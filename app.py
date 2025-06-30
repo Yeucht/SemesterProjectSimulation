@@ -47,29 +47,47 @@ def generate_meter_data(smart_meter_id):
     }
 
 
+import time
+import random
+import requests
+
 def send_data():
     global running
+    base_rate = config_data.get("rate", 1)  # e.g., 3 messages/sec
+    randomness = config_data.get("rate_randomness", 0.0)
+    meters = config_data.get("nbr_smart_meters", 1)
+
+    interval = 1.0 / base_rate
+
+    next_time = time.perf_counter()
+
     while running:
+        start = time.perf_counter()
+
+        # Simulate random timing
+        rand_adjustment = random.uniform(-randomness, randomness)
+        adjusted_interval = max(0, interval + rand_adjustment)
+
+        # Send one or more messages here
+        # For example: simulate_data_and_send()
+
         try:
-            rate = config_data.get("rate", 3)
-            randomness = config_data.get("rate_randomness", 0.8)
-            delay = max(0.01, 1.0 / (rate + random.uniform(-randomness, randomness)))
-            meter_id = random.randint(1, config_data.get("nbr_smart_meters", 5000))
-            data = generate_meter_data(meter_id)
-            url = config_data.get("url")
-
-            # Optional batch handling
-            if config_data.get("batch"):
-                batch_size = config_data.get("batch_size", 10)
-                batch = [generate_meter_data(random.randint(1, config_data.get("nbr_smart_meters"))) for _ in range(batch_size)]
-                requests.post(url, json=batch)
-            else:
-                requests.post(url, json=data)
-
-            time.sleep(delay)
-
+            # Replace this with actual data send
+            print("Sending data...")  # placeholder
+            # requests.post(config['url'], json=generate_data())
         except Exception as e:
-            print(f"[ERROR] {e}")
+            print(f"Error sending data: {e}")
+
+        # Compute next ideal time
+        next_time += adjusted_interval
+        sleep_time = next_time - time.perf_counter()
+
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+        else:
+            # We fell behind schedule
+            next_time = time.perf_counter()  # reset to avoid drift
+
 
 
 @app.route('/config', methods=['GET', 'POST'])
