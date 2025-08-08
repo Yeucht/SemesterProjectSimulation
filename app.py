@@ -4,6 +4,7 @@ import random
 import time
 import requests
 from flask import Flask, request, jsonify
+from jinja2.filters import do_batch
 
 app = Flask(__name__)
 
@@ -13,7 +14,7 @@ config_data = {
     'url': "http://sp-service:8080/api/injection/data",
     'nbr_smart_meters': 5000,
     'batch': False,             # False = envoi single, True = envoi en batch
-    'batch_size': 10,           # taille de batch de référence
+    'batchSize': 10,           # taille de batch de référence
     'batch_randomness': 0.2,    # ±20% sur la taille de batch
     'mdmsBatch': False,
     'mdmsBatchSize': 10,
@@ -25,7 +26,17 @@ thread = None
 
 def generate_meter_data(smart_meter_id):
     seq     = random.randint(1, 1000)
-    payload = [random.randint(-128, 127) for _ in range(25)]
+    do_batch = config_data.get('batch', False)
+    base_batch_size = config_data.get("batchSize", 1)
+    batch_rand = config_data.get("batch_randomness", 0.0)
+    if do_batch:
+        # taille de batch variable autour de base_batch_size
+        factor = 1 + random.uniform(-batch_rand, batch_rand)
+        n = max(1, int(base_batch_size * factor))
+        payload = [random.randint(0, 127) for _ in range(n)]
+    else:
+        payload = [random.randint(0, 127)]
+
     return {
         "authUser": f"M3P{smart_meter_id}",
         "authSerialNumber": f"{smart_meter_id}",
@@ -39,13 +50,13 @@ def generate_meter_data(smart_meter_id):
         "masterUnitNumber": "null",
         "masterUnitOwnerId": "null",
         "masterUnitType": "null",
-        "meteringData": [{
+        "meterData": {
             "sequence": seq,
             "status": 0,
             "version": 2,
             "address": None,
             "payload": payload
-        }]
+        }
     }
 
 
@@ -55,7 +66,7 @@ def send_data():
     rate_rand        = config_data.get("rate_randomness", 0.0)
     meters           = config_data.get("nbr_smart_meters", 1)
     do_batch         = config_data.get("batch", False)
-    base_batch_size  = config_data.get("batch_size", 1)
+    base_batch_size  = config_data.get("batchSize", 1)
     batch_rand       = config_data.get("batch_randomness", 0.0)
     url              = config_data.get("url")
 
@@ -67,14 +78,7 @@ def send_data():
         adj_interval = interval * (1 + random.uniform(-rate_rand, rate_rand))
         next_time += adj_interval
 
-        # Détermination de la charge à envoyer
-        if do_batch:
-            # taille de batch variable autour de base_batch_size
-            factor = 1 + random.uniform(-batch_rand, batch_rand)
-            n = max(1, int(base_batch_size * factor))
-            payload = [generate_meter_data(random.randint(1, meters)) for _ in range(n)]
-        else:
-            payload = generate_meter_data(random.randint(1, meters))
+        payload = generate_meter_data(random.randint(1, meters))
 
         # Envoi HTTP
         try:
