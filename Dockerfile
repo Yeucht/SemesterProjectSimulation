@@ -1,19 +1,20 @@
-# app/Dockerfile
+FROM python:3.12-slim
 
-FROM python:3.9-slim
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    software-properties-common \
-    && rm -rf /var/lib/apt/lists/*
+# Installer les deps Python uniquement
+RUN pip install --no-cache-dir \
+    "Flask>=3.0.0" \
+    "requests>=2.31.0" \
+    "gunicorn>=21.2.0"
 
-COPY ./app.py ./
-COPY ./requirements.txt ./
+# Copie du code (adapte les chemins)
+WORKDIR /app
+COPY . /app
 
-RUN pip3 install -r requirements.txt
-
+# Expose le port Flask/Gunicorn
 EXPOSE 8000
 
-ENTRYPOINT ["python"]
-CMD ["app.py"]
+# Lance l’app Flask (module: app.py avec app=Flask(...))
+CMD ["gunicorn","-b","0.0.0.0:8000","--log-level","debug","--access-logfile","-","--error-logfile","-","--capture-output","app:app"]
