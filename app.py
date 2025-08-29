@@ -138,7 +138,7 @@ def now_ms() -> int:
 
 def rand_signed_bytes(n: int):
     # valeurs signées [-128, 127]
-    return [random.randint(-128, 127) for _ in range(n)]
+    return [random.randint(-40, 127) for _ in range(n)]
 
 def auth_digest_hex(n=40):
     # 40 hex chars (style SHA-256)
@@ -476,7 +476,7 @@ class IndividualProducer(threading.Thread):
                 # longueur du payload = probes produits pendant CET intervalle
                 # (utilise *le même intervalle* que le pacing → cohérent avec le jitter)
                 elapsed_h = interval / 3600.0
-                payload_len = payload_len_from_interval(probe_rate, elapsed_h)
+                payload_len = payload_len_from_interval(probe_rate, elapsed_h*nbr)
 
                 seq = next_sequence(mid)
                 entry = build_metering_data_entry(seq, payload_len)
@@ -742,7 +742,7 @@ def stop_sim():
         STOP_EVENT = None
         start_sim._running = False
 
-        return jsonify({"status": "simulation stopped"})
+        return jsonify({"status": "stopping"}), 202
 
 
 
