@@ -6,14 +6,14 @@ import requests
 import sys, traceback
 
 
-# =========================
-# Flask & HTTP
-# =========================
+#=========================
+#Flask & HTTP
+#=========================
 app = Flask(__name__)
 
-# =========================
-# HTTP (thread-local)
-# =========================
+#=========================
+#HTTP (thread-local)
+#=========================
 _thread_local = threading.local()
 
 def http_session():
@@ -24,57 +24,57 @@ def http_session():
     return s
 
 def post_with_timeout(url, payload, base_timeout=15):
-    # Réduit le timeout si on est en train de stopper
+    #Shorter timeout when stopping
     global STOP_EVENT
     timeout = 3 if (STOP_EVENT and STOP_EVENT.is_set()) else base_timeout
     return http_session().post(url, json=payload, timeout=timeout)
 
 def _thread_excepthook(args):
-    # Python 3.8+: capture exceptions de threads (hors main)
+    #Python 3.8+: capture thread exceptions
     print(f"[THREAD-EXC] name={args.thread.name} exc={args.exc!r}")
     traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback)
 
-# Active l’excepthook global
+#Enable global thread excepthook
 setattr(threading, "excepthook", _thread_excepthook)
 
-# =========================
-# Concurrency primitives
-# =========================
+#=========================
+#Concurrency primitives
+#=========================
 STOP_EVENT = None
 CFG_LOCK = threading.RLock()
 
-# Compteurs d'envois & dernier envoi par meter
+#Send counters & last-send per meter
 SEQ_LOCK = threading.RLock()
-METER_SEQ: dict[int, int] = {}     # meter_id -> nombre d'envois
-LAST_SENT: dict[int, float] = {}   # meter_id -> perf_counter du dernier envoi
+METER_SEQ: dict[int, int] = {}     #meter_id -> send count
+LAST_SENT: dict[int, float] = {}   #meter_id -> last perf_counter
 RUN_LOCK = threading.RLock()
 
-# =========================
-# Configuration par défaut
-# (mêmes clés/orthographe que ta SimulationConfig Java)
-# =========================
+#=========================
+#Default configuration
+#(same keys as Java SimulationConfig)
+#=========================
 CONFIG = {
     "dbType": "QUESTDB",
 
     "clearTablesFlag": False,
     "retentionWindowMillis": 1_000_000_000,
 
-    "meterFlag": True,            # individuels ON/OFF
-    "hesFlag": True,              # HES ON/OFF
+    "meterFlag": True,            #individuals ON/OFF
+    "hesFlag": True,              #HES ON/OFF
 
-    # Individuels
-    "probeRate": 4,               # probes/heure produits par un SM (individuel)
-    "meterRate": 4,               # envois/heure par SM (doit être <= probeRate)
-    "meterRateRandomness": 0.2,   # jitter sur l'intervalle d'envoi
+    #Individuals
+    "probeRate": 4,               #probes/hour produced by a SM
+    "meterRate": 4,               #sends/hour per SM (<= probeRate)
+    "meterRateRandomness": 0.2,   #interval jitter
 
-    # HES
-    "hesRate": 2,                 # envois/jour du HES (cadence des envois agrégés)
-    "hesRateRandomness": 50,      # 0..100 (position dans la fenêtre)
-    "hesSynchronized": False,     # base commune (True) vs placement libre (False)
+    #HES
+    "hesRate": 2,                 #sends/day for HES (aggregate cadence)
+    "hesRateRandomness": 50,      #0..100 (window position)
+    "hesSynchronized": False,     #common base (True) vs free placement (False)
 
-    "hesProbeRate": 4,            # probes/heure produits par un SM rattaché à un HES
-    "hesMeterRate": 4,            # envois/heure par SM (dans la fenêtre agrégée HES)
-    "hesMeterRateRandomness": 0.2,# jitter sur la *taille* d'un micro-envoi (via ratio)
+    "hesProbeRate": 4,            #probes/hour per SM attached to HES
+    "hesMeterRate": 4,            #sends/hour per SM (within HES window)
+    "hesMeterRateRandomness": 0.2,#jitter on micro-send size (via ratio)
 
     "url": "http://sp-service:8080/api/injection/data",
 
@@ -83,19 +83,19 @@ CONFIG = {
     "nbrMetersPerHES": 10,
     "nbrMetersPerHESRandomness": 0.2,
 
-    # mdms (inchangé, pas utilisé)
+    #mdms (unused)
     "mdmsBatch": False,
     "mdmsBatchSize": 10
 }
 
-
 def conf():
+    #Thread-safe read of CONFIG
     with CFG_LOCK:
         return dict(CONFIG)
 
-# =========================
-# Build control (epoch + thread)
-# =========================
+#=========================
+#Build control (epoch + thread)
+#=========================
 BUILD_LOCK = threading.RLock()
 BUILD_EPOCH = 0
 BUILD_THREAD = None
@@ -105,6 +105,7 @@ def current_epoch():
         return BUILD_EPOCH
 
 def bump_epoch():
+    #Increment global build epoch
     global BUILD_EPOCH
     with BUILD_LOCK:
         BUILD_EPOCH += 1
@@ -112,74 +113,73 @@ def bump_epoch():
 
 def build_job(epoch: int):
     """
-    Job asynchrone lancé après /config.
-    Il peut être 'supplanté' par une update suivante (epoch change).
+    Async job triggered after /config.
+    Can be superseded by a newer epoch.
     """
-    # Debounce léger pour absorber une rafale d'updates
+    #Light debounce to absorb bursts
     time.sleep(0.3)
     if epoch != current_epoch():
         return
 
     cfg = conf()
     POOLS.rebuild(cfg)
-    purge_missing_meters()  # nettoie METER_SEQ / LAST_SENT
+    purge_missing_meters()  #cleanup METER_SEQ/LAST_SENT
 
-    # Si la simu tourne, on MAJ le manager (et on tue les workers obsolètes)
+    #If running, rebuild manager (kill obsolete workers)
     global hes_MGR
     if hes_MGR is not None:
         hes_MGR.rebuild(cfg)
 
-
-# =========================
-# Utils
-# =========================
+#=========================
+#Utils
+#=========================
 def now_ms() -> int:
     return int(time.time() * 1000)
 
 def rand_signed_bytes(n: int):
-    # valeurs signées [-128, 127]
+    #Signed values in [-128,127]
     return [random.randint(-40, 127) for _ in range(n)]
 
 def auth_digest_hex(n=40):
-    # 40 hex chars (style SHA-256)
+    #Fake 40-hex digest
     return ''.join(random.choices("0123456789abcdef", k=n))
 
 def next_sequence(meter_id: int) -> int:
+    #Monotonic per-meter sequence
     with SEQ_LOCK:
         METER_SEQ[meter_id] = METER_SEQ.get(meter_id, 0) + 1
         return METER_SEQ[meter_id]
 
 def mark_sent(meter_id: int, t_perf: float):
+    #Record last send perf time
     with SEQ_LOCK:
         LAST_SENT[meter_id] = t_perf
 
 def elapsed_hours_since_last(meter_id: int, now_perf: float, default_hours: float) -> float:
+    #Hours since last send, fallback to default window
     with SEQ_LOCK:
         t0 = LAST_SENT.get(meter_id)
     if t0 is None:
-        # 1er envoi: on agrège un cycle entier par défaut
         return max(0.0, default_hours)
     return max(0.0, (now_perf - t0) / 3600.0)
 
-
 def getc(d, *keys, default=None):
     """
-    Lit la première clé existante parmi *keys* dans le dict d.
-    Exemple: getc(cfg, "hesRate","hesRate", default=1)
+    Read first existing key among *keys* in dict d.
+    Example:getc(cfg,"hesRate","hesRate",default=1)
     """
     for k in keys:
         if k in d:
             return d[k]
     return default
 
-
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 def stochastic_round(x: float) -> int:
     """
-    Arrondi fractionnaire: floor(x) + Bernoulli(frac(x)).
-    Garantit >= 0.
+    Fractional rounding: floor(x) + Bernoulli(frac(x)).
+    Guarantees >= 0.
     """
     if x <= 0:
         return 0
@@ -189,8 +189,8 @@ def stochastic_round(x: float) -> int:
 
 def payload_len_from_interval(probe_rate_per_hour: float, elapsed_hours: float) -> int:
     """
-    Longueur de payload = nb de valeurs produites pendant l'intervalle écoulé,
-    arrondi stochastiquement.
+    Payload length = probes produced during elapsed interval,
+    stochastically rounded.
     """
     expected = max(0.0, probe_rate_per_hour) * max(0.0, elapsed_hours)
     n = stochastic_round(expected)
@@ -198,11 +198,10 @@ def payload_len_from_interval(probe_rate_per_hour: float, elapsed_hours: float) 
 
 def payload_len_from_ratio(probe_rate_per_hour: float, meter_rate_per_hour: float, rate_jitter: float) -> int:
     """
-    Longueur de payload d'un micro-envoi = ratio probes/send.
-    On applique un jitter multiplicatif sur le meter_rate (équiv. à jitter sur l'intervalle).
+    Micro-send payload length ≈ probes/send ratio.
+    Applies multiplicative jitter on meter_rate.
     """
     meter_rate_per_hour = max(0.0001, meter_rate_per_hour)
-    # Appliquer jitter multiplicatif (1±r) sur le meterRate
     if rate_jitter > 0:
         meter_rate_per_hour *= (1 + random.uniform(-rate_jitter, rate_jitter))
         meter_rate_per_hour = max(0.0001, meter_rate_per_hour)
@@ -210,17 +209,16 @@ def payload_len_from_ratio(probe_rate_per_hour: float, meter_rate_per_hour: floa
     n = stochastic_round(max(0.0, ratio))
     return max(1, n)
 
-
-# =========================
-# Payload builders (toujours List<DataPacket>)
-# =========================
+#=========================
+#Payload builders (List[DataPacket])
+#=========================
 def build_metering_data_entry(seq_value: int, payload_len: int):
     return {
         "sequence": seq_value,
         "status": 0,
         "version": 2,
         "address": None,
-        # 👇 tableau de bytes (valeurs signées), LONGUEUR = payload_len
+        #Signed byte array with length=payload_len
         "payload": rand_signed_bytes(payload_len)
     }
 
@@ -241,16 +239,13 @@ def build_datapacket_for_meter(meter_id: int, metering_entries: list[dict]):
         "meteringData": metering_entries,
     }
 
-
-
-
-# =========================
-# Pools d'IDs (disjoints)
-# =========================
+#=========================
+#ID pools (disjoint)
+#=========================
 class Pools:
     """
-    - pool_individual = [1 .. nbrSmartMeters]
-    - pool hes: à partir de nbrSmartMeters+1, par hes avec taille tirée une fois
+    -pool_individual = [1..nbrSmartMeters]
+    -HES pools: start at nbrSmartMeters+1, sizes drawn once
     """
     def __init__(self):
         self.pool_individual: list[int] = []
@@ -259,7 +254,7 @@ class Pools:
     def rebuild(self, cfg):
         if not bool(cfg.get("hesFlag", True)):
             self.hes_to_meters = {}
-            # pool individuels seulement
+            #Individuals only
             self.pool_individual = list(range(1, int(cfg.get("nbrSmartMeters", 1)) + 1))
             return
         n_indiv = int(cfg.get("nbrSmartMeters", 1))
@@ -267,16 +262,16 @@ class Pools:
         per_hes = int(cfg.get("nbrMetersPerHES", 1))
         rnd     = float(cfg.get("nbrMetersPerHESRandomness", 0.0))
 
-        # Pool individuels
+        #Individual pool
         self.pool_individual = list(range(1, n_indiv + 1))
 
-        # Tirage des tailles par hes (stable jusqu'au prochain rebuild)
+        #Sample sizes per HES (stable until next rebuild)
         sizes = []
         for _ in range(n_hes):
             s = int(round(per_hes * (1 + random.uniform(-rnd, rnd))))
             sizes.append(max(0, s))
 
-        # Allocation contiguë d’IDs hes
+        #Contiguous ID allocation for HES
         start_id = n_indiv + 1
         current  = start_id
         self.hes_to_meters = {}
@@ -295,21 +290,21 @@ class Pools:
 
 POOLS = Pools()
 
-# =========================
-# hes Worker (1 thread par hes)
-# =========================
+#=========================
+#HES Worker (1 thread per HES)
+#=========================
 class hesWorker(threading.Thread):
     def __init__(self, hes_id: int, meters: list[int], base_cfg: dict, stop_event: threading.Event):
         super().__init__(daemon=True)
         self.hes_id = hes_id
-        self.meters = meters[:]  # IDs stables pour ce hes
+        self.meters = meters[:]  #stable IDs for this HES
         self._stop_event = stop_event
         self._set_cfg(base_cfg)
         self.cycle_start = time.perf_counter()
         self._planify_cycle()
-        self.next_fire += random.uniform(0, min(0.5, self._cycle_len_s() * 0.01)) # mini jitter initial (≤ 0.5s ou 1% du cycle) pour casser les collisions exactes
-        self._local_stop = threading.Event()  # stop individuel du worker
-        self._parent_stop = stop_event  # stop global du run
+        self.next_fire += random.uniform(0, min(0.5, self._cycle_len_s() * 0.01))  #tiny initial jitter
+        self._local_stop = threading.Event()  #per-worker stop
+        self._parent_stop = stop_event        #global stop
 
     def _set_cfg(self, base_cfg: dict):
         local = dict(base_cfg)
@@ -317,27 +312,27 @@ class hesWorker(threading.Thread):
         self.rate_per_day = max(0.0001, float(local.get("hesRate", 1)))
         self.sync = bool(local.get("hesSynchronized", False))
         self.rand_pct = max(0, min(100, int(local.get("hesRateRandomness", 0))))
-        self._local_cfg = local  # pour batch/sample rules
+        self._local_cfg = local  #for batch/sample rules
 
     def _cycle_len_s(self) -> float:
         return (24.0 / self.rate_per_day) * 3600.0
 
     def _planify_cycle(self):
         """
-        synchronized = False:
-          - rand_pct = 0   -> offsets répartis régulièrement dans [0, cycle) (evenly spaced)
-          - rand_pct = 100 -> offset ~ U(0, cycle)
-          - sinon          -> interpolation linéaire: offset = (1-a)*base + a*U(0,cycle), a=rand_pct/100
-        synchronized = True:
-          - rand_pct = 0   -> tous envoient au début de cycle (offset=0)
-          - rand_pct = 100 -> offset ~ U(0, cycle)
-          - sinon          -> offset = a*U(0,cycle)  (progressivement plus aléatoire autour de 0→full window)
+        synchronized=False:
+          -rand_pct=0 -> evenly spaced offsets
+          -rand_pct=100 -> uniform offset in [0,cycle)
+          -else -> linear blend base vs uniform
+        synchronized=True:
+          -rand_pct=0 -> all at cycle start
+          -rand_pct=100 -> uniform offset in [0,cycle)
+          -else -> scaled uniform around start
         """
         cycle = self._cycle_len_s()
         a = clamp(self.rand_pct / 100.0, 0.0, 1.0)
 
         if not self.sync:
-            # base = position régulière dans la fenêtre en fonction du rang
+            #Base offset by HES rank
             rank, n = self._rank_and_count()
             base = 0.0 if n <= 0 else (rank / n) * cycle
 
@@ -346,26 +341,24 @@ class hesWorker(threading.Thread):
             elif self.rand_pct >= 100:
                 offset = random.uniform(0.0, cycle)
             else:
-                # mélange linéaire: 0% → base, 100% → uniform(0,cycle)
                 offset = (1.0 - a) * base + a * random.uniform(0.0, cycle)
         else:
-            # synchronized: base commune = 0
+            #Synchronized: base at 0
             if self.rand_pct <= 0:
                 offset = 0.0
             elif self.rand_pct >= 100:
                 offset = random.uniform(0.0, cycle)
             else:
-                # progression linéaire vers un placement uniformément aléatoire
                 offset = a * random.uniform(0.0, cycle)
 
         self.next_fire = self.cycle_start + max(0.0, min(offset, cycle))
 
     def _sleep_until(self, t_target):
+        #Light sleep loop to react to stop quickly
         while not self._should_stop():
             dt = t_target - time.perf_counter()
             if dt <= 0:
                 return
-            # se réveille fréquemment pour réagir vite au stop
             self._parent_stop.wait(min(0.2, dt))
 
     def _tick_send(self):
@@ -382,20 +375,20 @@ class hesWorker(threading.Thread):
 
         batch = []
         for mid in self.meters:
-            # Fenêtre d’agrégation depuis le dernier push HES
+            #Aggregation window since last HES push
             eh = elapsed_hours_since_last(mid, nowp, default_hours)
 
-            # Nombre de "micro-envois" (probe-packets) qu’aurait fait le SM dans la fenêtre
+            #Number of micro-sends in window
             n_probes = max(1, stochastic_round(eh * max(0.0001, hes_send_rate)))
 
             entries = []
             for _ in range(n_probes):
-                # Taille d'un micro-envoi ≈ hesProbeRate/hesMeterRate (avec jitter stochastique)
+                #Micro-send size from probe/send ratio with jitter
                 payload_len = payload_len_from_ratio(hes_probe_rate, hes_send_rate, rate_jit)
-                seq = next_sequence(mid)  # 1 sequence par micro-envoi dudit SM
+                seq = next_sequence(mid)
                 entries.append(build_metering_data_entry(seq, payload_len))
 
-            dp = build_datapacket_for_meter(mid, entries)  # meteringData = liste de n_probes entrées
+            dp = build_datapacket_for_meter(mid, entries)
             batch.append(dp)
             mark_sent(mid, nowp)
 
@@ -407,8 +400,7 @@ class hesWorker(threading.Thread):
                 avg_probes = sum(len(dp["meteringData"]) for dp in batch) / len(batch)
                 avg_plen = sum(sum(len(e["payload"]) for e in dp["meteringData"]) for dp in batch)
                 avg_plen = avg_plen / max(1, sum(len(dp["meteringData"]) for dp in batch))
-                print(
-                    f"[HES#{self.hes_id}] meters={len(batch)}; ~probes_per_meter={avg_probes:.1f}; ~payload_len={avg_plen:.2f}")
+                print(f"[HES#{self.hes_id}] meters={len(batch)}; ~probes_per_meter={avg_probes:.1f}; ~payload_len={avg_plen:.2f}")
         except Exception as e:
             print(f"[HES#{self.hes_id}] EXC {e}")
 
@@ -427,24 +419,23 @@ class hesWorker(threading.Thread):
             traceback.print_exc()
 
     #Helpers
-    # ranks and nbr of HES
     def _rank_and_count(self) -> tuple[int, int]:
-        # Récupère l’ordre des HES actuel depuis POOLS (ids triés)
+        #Get current HES order from POOLS
         try:
             keys = sorted(POOLS.hes_to_meters.keys())
             n = len(keys)
-            # .index O(n) mais n=400 → OK. Si tu veux O(1), pré-calcule un dict hid->rank côté manager.
             r = keys.index(self.hes_id) if n > 0 else 0
             return r, n
         except Exception:
             return 0, 1
 
     def _should_stop(self) -> bool:
+        #Local or global stop flag
         return self._local_stop.is_set() or self._parent_stop.is_set()
 
-# =========================
-# Producteur Individuels
-# =========================
+#=========================
+#Individual Producer
+#=========================
 class IndividualProducer(threading.Thread):
     def __init__(self, stop_event: threading.Event):
         super().__init__(daemon=True)
@@ -459,28 +450,24 @@ class IndividualProducer(threading.Thread):
 
             probe_rate = float(cfg.get("probeRate", 1.0))
             send_rate  = float(cfg.get("meterRate", 1.0))
-            send_rate  = min(send_rate, probe_rate)  # enforce send_rate ≤ probe_rate
+            send_rate  = min(send_rate, probe_rate)  #enforce send_rate ≤ probe_rate
             jitter     = float(cfg.get("meterRateRandomness", 0.0))
             nbr        = int(cfg.get("nbrSmartMeters", 1))
 
-            # En moyenne, chaque SM envoie 'send_rate' fois/heure.
-            # Nous tirons UN SM au hasard et programmons un envoi pour lui.
-            # On répartit la charge sur tous les SM => intervalle moyen global:
+            #Global pacing: one random SM per tick
             base_interval = 3600.0 / max(0.0001, send_rate * nbr)
-            # appliquer jitter multiplicatif sur l'intervalle
             interval = base_interval * (1 + random.uniform(-jitter, jitter))
             interval = max(0.001, interval)
 
             mid = POOLS.individual_random_id()
             if mid is not None:
-                # longueur du payload = probes produits pendant CET intervalle
-                # (utilise *le même intervalle* que le pacing → cohérent avec le jitter)
+                #Payload length = probes produced during this interval across SMs
                 elapsed_h = interval / 3600.0
-                payload_len = payload_len_from_interval(probe_rate, elapsed_h*nbr)
+                payload_len = payload_len_from_interval(probe_rate, elapsed_h * nbr)
 
                 seq = next_sequence(mid)
                 entry = build_metering_data_entry(seq, payload_len)
-                dp = build_datapacket_for_meter(mid, [entry])  # un seul micro-envoi
+                dp = build_datapacket_for_meter(mid, [entry])
 
                 try:
                     r = post_with_timeout(cfg["url"], [dp], base_timeout=10)
@@ -492,13 +479,13 @@ class IndividualProducer(threading.Thread):
                     print(f"[INDIV] EXC {e}")
                 mark_sent(mid, time.perf_counter())
 
-            # pacing (Poisson-like)
+            #Poisson-like pacing
             sleep_s = random.expovariate(1.0 / interval)
             self._stop_event.wait(min(max(sleep_s, 0.001), interval * 3))
 
-# =========================
-# hes Manager
-# =========================
+#=========================
+#HES Manager
+#=========================
 class hesManager:
     def __init__(self, stop_event: threading.Event):
         self.stop_event = stop_event
@@ -506,10 +493,9 @@ class hesManager:
 
     def rebuild(self, cfg: dict):
         if not bool(cfg.get("hesFlag", True)):
-            # Stopper proprement tous les workers
+            #Cleanly stop workers
             for w in self.workers.values():
                 w._local_stop.set()
-            # (optionnel) join rapide
             for w in self.workers.values():
                 if w.is_alive():
                     w.join(timeout=2)
@@ -517,19 +503,18 @@ class hesManager:
             POOLS.hes_to_meters = {}
             return
 
-        # Recalcule les pools
+        #Recompute pools
         POOLS.rebuild(cfg)
 
-        # Stop & remove obsolete workers
+        #Stop & remove obsolete workers
         for hid in list(self.workers.keys()):
             if hid not in POOLS.hes_to_meters:
                 self.workers[hid]._local_stop.set()
-                # (optionnel) join rapide
                 if self.workers[hid].is_alive():
                     self.workers[hid].join(timeout=2)
                 self.workers.pop(hid, None)
 
-        # Create/update workers
+        #Create/update workers
         for hid, meters in POOLS.hes_to_meters.items():
             if hid in self.workers:
                 self.workers[hid].meters = meters[:]
@@ -544,12 +529,11 @@ class hesManager:
 hes_MGR = None
 INDIV = None
 
-
-# Helpers
+#Helpers
 def _coerce_config_types(d: dict) -> dict:
     """
-    Force les bons types pour les clés connues.
-    Ignore les clés inconnues (on les passe quand même à CONFIG.update).
+    Force correct types for known keys.
+    Ignore unknown keys (still passed to CONFIG.update).
     """
     def as_bool(x):
         if isinstance(x, bool): return x
@@ -568,26 +552,27 @@ def _coerce_config_types(d: dict) -> dict:
         if isinstance(x, str): return float(x)
         return x
 
-    typed = dict(d)  # copie
-    # booleans
+    typed = dict(d)  #copy
+    #Booleans
     for k in ["clearTablesFlag", "meterFlag", "hesFlag", "hesSynchronized", "mdmsBatch"]:
         if k in typed: typed[k] = as_bool(typed[k])
 
-    # ints
+    #Ints
     for k in ["probeRate", "meterRate", "hesRate", "hesProbeRate", "hesMeterRate",
               "nbrSmartMeters", "nbrHES", "nbrMetersPerHES", "mdmsBatchSize"]:
         if k in typed: typed[k] = as_int(typed[k])
 
-    # floats
+    #Floats
     for k in ["meterRateRandomness", "hesMeterRateRandomness", "nbrMetersPerHESRandomness"]:
         if k in typed: typed[k] = as_float(typed[k])
 
-    # pourcentages
+    #Percentages
     if "hesRateRandomness" in typed: typed["hesRateRandomness"] = as_int(typed["hesRateRandomness"])
 
     return typed
 
 def _diff(old: dict, new: dict) -> dict:
+    #Key-wise diff of updated fields
     out = {}
     for k, v in new.items():
         ov = old.get(k, None)
@@ -596,6 +581,7 @@ def _diff(old: dict, new: dict) -> dict:
     return out
 
 def purge_missing_meters():
+    #Drop sequences/timestamps for meters no longer in pools
     with SEQ_LOCK:
         valid = set(POOLS.pool_individual)
         for ms in POOLS.hes_to_meters.values():
@@ -605,12 +591,9 @@ def purge_missing_meters():
                 if k not in valid:
                     d.pop(k, None)
 
-
-
-
-# =========================
-# Flask endpoints
-# =========================
+#=========================
+#Flask endpoints
+#=========================
 @app.route("/config", methods=["GET", "POST"])
 def api_config():
     global CONFIG, hes_MGR
@@ -628,7 +611,7 @@ def api_config():
             }
         })
 
-    # ---- POST (update) ----
+    #---- POST (update) ----
     try:
         raw = request.get_json(force=True, silent=False)
         app.logger.info(f"/config POST raw={raw}")
@@ -636,7 +619,7 @@ def api_config():
         if raw is None:
             return jsonify({"status": "error", "msg": "Empty JSON body"}), 400
 
-        # Certains clients envoient { "config": { ... } }
+        #Accept {"config":{...}} wrapper
         data = raw.get("config") if isinstance(raw, dict) and "config" in raw else raw
         if not isinstance(data, dict):
             return jsonify({"status": "error", "msg": "JSON must be an object or {\"config\":{...}}"}), 400
@@ -650,7 +633,7 @@ def api_config():
 
         applied = _diff(before, data)
 
-        # Incrémente l'epoch et lance le build asynchrone (interrompable)
+        #Bump epoch and launch interruptible build
         epoch = bump_epoch()
         t = threading.Thread(target=build_job, args=(epoch,), daemon=True)
         t.start()
@@ -662,17 +645,15 @@ def api_config():
             "config": conf()
         }), 202
 
-
     except Exception as e:
         app.logger.exception("Error while updating config")
         return jsonify({"status": "error", "msg": str(e)}), 500
-
 
 @app.route("/build", methods=["POST"])
 def build_only():
     cfg = conf()
     POOLS.rebuild(cfg)
-    # On prépare un manager sans démarrer les threads
+    #Prepare manager without starting threads
     return jsonify({
         "status": "built",
         "mappingPreview": {
@@ -681,8 +662,6 @@ def build_only():
         },
         "individualPoolSize": len(POOLS.pool_individual)
     })
-
-
 
 @app.route("/start", methods=["GET"])
 def start_sim():
@@ -713,8 +692,6 @@ def start_sim():
             "individualPoolSize": len(POOLS.pool_individual)
         })
 
-
-
 @app.route("/stop", methods=["GET"])
 def stop_sim():
     global hes_MGR, INDIV, STOP_EVENT
@@ -725,11 +702,10 @@ def stop_sim():
         if STOP_EVENT is not None:
             STOP_EVENT.set()
 
-        # stop local des workers
+        #Stop all workers
         if hes_MGR is not None:
             for w in hes_MGR.workers.values():
                 w._local_stop.set()
-
             for w in hes_MGR.workers.values():
                 if w.is_alive():
                     w.join(timeout=5)
@@ -743,8 +719,6 @@ def stop_sim():
         start_sim._running = False
 
         return jsonify({"status": "stopping"}), 202
-
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
